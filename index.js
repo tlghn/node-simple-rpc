@@ -314,7 +314,7 @@ class Field {
     }
 
     static writeType(stream, type, done) {
-        var typeBuffer = new Buffer(1);
+        var typeBuffer = Buffer.alloc(1);
         typeBuffer.writeUInt8(type);
         stream.write(typeBuffer, done);
     }
@@ -325,7 +325,7 @@ class Field {
             return Field.writeType(stream, TYPE_STRING_EMPTY, done);
         }
 
-        var strBuffer = new Buffer(value, 'utf8');
+        var strBuffer = Buffer.alloc(value, 'utf8');
 
         queue(
             done,
@@ -458,7 +458,7 @@ class Field {
                     Field.writeType(stream, type, next);
                 },
                 function (next) {
-                    var buffer = new Buffer(bits / 8);
+                    var buffer = Buffer.alloc(bits / 8);
                     buffer[method](value, 0);
                     stream.write(buffer, next);
                 }
@@ -473,7 +473,7 @@ class Field {
                     Field.writeType(stream, TYPE_FLOAT, next);
                 },
                 function (next) {
-                    var buffer = new Buffer(4);
+                    var buffer = Buffer.alloc(4);
                     buffer.writeFloatBE(value, 0);
                     stream.write(buffer, next);
                 }
@@ -487,7 +487,7 @@ class Field {
                 Field.writeType(stream, TYPE_DOUBLE, next);
             },
             function (next) {
-                var buffer = new Buffer(8);
+                var buffer = Buffer.alloc(8);
                 buffer.writeDoubleBE(value, 0);
                 stream.write(buffer, next);
             }
