@@ -1,6 +1,6 @@
 {
   "name": "node-simple-rpc",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Simple RPC server and client for Node.js",
   "main": "index.js",
   "scripts": {
