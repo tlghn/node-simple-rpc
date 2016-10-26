@@ -1,7 +1,12 @@
 # node-simple-rpc
 Simple RPC server and client for Node.js
 
-## Usage
+### Install
+```
+    npm i node-simple-rpc --save
+```
+
+### Usage
 
 Options : 
 ```
