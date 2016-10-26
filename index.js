@@ -325,7 +325,7 @@ class Field {
             return Field.writeType(stream, TYPE_STRING_EMPTY, done);
         }
 
-        var strBuffer = Buffer.alloc(value, 'utf8');
+        var strBuffer = Buffer.from(value, 'utf8');
 
         queue(
             done,
