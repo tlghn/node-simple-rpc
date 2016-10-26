@@ -843,7 +843,7 @@ class Server extends Socket {
     stop() {
         let {client} = this;
         if (!client) return;
-        client.destroy();
+        client.close();
         delete this[SYM_CLIENT];
     }
 
