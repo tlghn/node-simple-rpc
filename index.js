@@ -9,6 +9,7 @@ const SYM_CLIENT = Symbol("client");
 const SYM_AUTH = Symbol("auth");
 const SYM_METHODS = Symbol("methods");
 const SYM_MIDDLEWARES = Symbol("middlewares");
+const SYM_OPTIONS = Symbol("options");
 
 
 function noop() {
@@ -65,6 +66,17 @@ const NUMBER_READERS = {
     [TYPE_UINT64]: [8, 'readUInt64BE'],
     [TYPE_FLOAT]: [4, 'readFloatBE'],
     [TYPE_DOUBLE]: [8, 'readDoubleBE']
+};
+
+const DEFAULT_SERVER_OPTIONS = {
+    host: 'localhost',
+    port: 23456,
+    maxUploadSize: 1048576
+};
+
+const DEFAULT_CLIENT_OPTIONS = {
+    host: 'localhost',
+    port: 23456
 };
 
 class Field {
@@ -485,27 +497,15 @@ class Field {
 
 class Message {
 
-    eachKey(cb) {
-        throw new Error("Abstract!");
-    }
-
-    hasKey() {
-        throw new Error("Abstract!");
-    }
-
-    peekKey() {
-        throw new Error("Abstract!");
-    }
-
-    shiftKey() {
-        throw new Error("Abstract!")
+    get keys(){
+        throw new Error("Abstract");
     }
 
     onKeyFail(key, err, cb) {
         throw new Error("Abstract!");
     }
 
-    onKeyReady(key, error, cb) {
+    onKeyReady(key, value, cb) {
         throw new Error("Abstract!");
     }
 
@@ -519,60 +519,107 @@ class Message {
 
     parse(cb) {
 
-        if (!this.hasKey()) {
-            return this.onComplete(cb);
-        }
-
-        if (!this.buffer || !this.buffer.length) {
+        if(this._offset < this.buffer.length){
             return;
         }
 
-        var currentKey = this.peekKey();
+        if(this._offset > this.buffer.length){
+            return cb(new Error("Input is too long"));
+        }
 
-        Field.deserialize(this.buffer, 0, function (err, result, offset) {
-            if (err) {
-                if (err.message === "EOF") {
-                    return;
+
+        var callbacks = this.keys.map(key => (offset, next) =>
+            Field.deserialize(this.buffer, offset, (err, result, offset) => {
+                if(err){
+                    return this.onKeyFail(key, err, next);
                 }
-                return this.onKeyFail(currentKey, err, cb);
-            }
-            this.buffer = this.buffer.slice(offset);
-            this.data[currentKey] = result;
-            this.onKeyReady(this.shiftKey(), result, function (err) {
-                if (err) return cb(err);
-                this.parse(cb);
-            }.bind(this));
+                this.data[key] = result;
+                this.onKeyReady(key, result, err => next(err, offset));
+            }));
 
-        }.bind(this));
+
+        callbacks.unshift(cb, next => next(null, 0));
+        callbacks.push((offset, next) => this.onComplete(next));
+
+
+        queue.apply(null, callbacks);
     }
 
-    process(buffer, cb) {
+    process(buffer, cb, maxUploadSize) {
 
         if (!Buffer.isBuffer(buffer)) {
             return cb(new Error("Invalid input"));
         }
 
-        if (!this.buffer) {
-            this.buffer = buffer;
-        } else {
-            this.buffer = Buffer.concat([this.buffer, buffer]);
+        if(typeof this._offset === 'undefined'){
+
+            if(this.buffer){
+                this.buffer = Buffer.concat([this.buffer, buffer]);
+            } else {
+                this.buffer = buffer;
+            }
+
+            if(this.buffer.length < 4){
+                return;
+            }
+
+            var tmp = this.buffer;
+            var length = tmp.readUInt32BE(0);
+
+            if(length <= 0){
+                return cb(new Error("Invalid input length"));
+            }
+
+            if(maxUploadSize && length > maxUploadSize){
+                return cb(new Error("Input length is too big ( " + length + " > " + maxUploadSize + " )"))
+            }
+
+            this.buffer = Buffer.alloc(length);
+            this._offset = 0;
+            buffer = tmp.slice(4);
         }
+
+        buffer.copy(this.buffer, this._offset);
+        this._offset += buffer.length;
 
         this.parse(cb);
     }
 
-    serialize(stream, done) {
-        var cb = [done];
+    genBuffers(done) {
+        var buffers = [];
+        var totalLength = 0;
+        var serializer = {
+            write: function (buffer, next) {
+                buffers.push(buffer.slice());
+                totalLength += buffer.length;
+                next();
+            }
+        }
+
         var data = this.data;
-        this.eachKey(function (key) {
-            cb.push((function (stream, value) {
-                return function (next) {
-                    Field.serialize(stream, value, next);
-                };
-            })(stream, data[key]));
+        var callbacks = this.keys.map(key => next => Field.serialize(serializer, data[key], next));
+
+        callbacks.push((next) => {
+            var buffer = Buffer.alloc(4);
+            buffer.writeUInt32BE(totalLength, 0);
+            buffers.unshift(buffer);
+            next(null, buffers);
         });
-        queue.apply(null, cb);
+
+        callbacks.unshift(done);
+
+        queue.apply(null, callbacks);
+
         return this;
+    }
+
+    serialize(stream, done) {
+        return this.genBuffers((err, buffers) => {
+            if(err) return done(err);
+            var callbacks = buffers.map(buffer => next => stream.write(buffer, err => next(err)));
+            callbacks.unshift(done);
+            queue.apply(null, callbacks);
+        });
     }
 }
 
@@ -585,20 +632,8 @@ class Input extends Message {
         this._authCallback = authCallback;
     }
 
-    eachKey(cb) {
-        this._keys.forEach(cb);
-    }
-
-    hasKey() {
-        return this._keys.length;
-    }
-
-    peekKey() {
-        return this._keys[0];
-    }
-
-    shiftKey() {
-        return this._keys.shift();
+    get keys() {
+        return this._keys;
     }
 
     onKeyFail(key, err, cb) {
@@ -631,20 +666,8 @@ class Output extends Message {
         this._data = data || {};
     }
 
-    eachKey(cb) {
-        this._keys.forEach(cb);
-    }
-
-    hasKey() {
-        return this._keys.length;
-    }
-
-    peekKey() {
-        return this._keys[0];
-    }
-
-    shiftKey() {
-        return this._keys.shift();
+    get keys() {
+        return this._keys;
     }
 
     onKeyFail(key, err, cb) {
@@ -698,10 +721,21 @@ class Socket extends HostPortAuth {
 
 class Server extends Socket {
 
-    constructor(host, port, auth) {
+    constructor(options) {
+        options = Object.assign({}, DEFAULT_SERVER_OPTIONS, options);
+        let {host, port, auth} = options;
         super(host, port, auth);
+        this[SYM_OPTIONS] = options;
         this[SYM_METHODS] = {};
         this[SYM_MIDDLEWARES] = [];
+    }
+
+    get options() {
+        return this[SYM_OPTIONS];
+    }
+
+    get maxUploadSize(){
+        return Math.max(this.options.maxUploadSize, 1);
     }
 
     get exports() {
@@ -773,13 +807,13 @@ class Server extends Socket {
                                         return c.emit('error', err);
                                     }
                                     debugServer("Results sent to %s:%s", c.remoteAddress, c.remotePort);
-                                    c.destroy();
+                                    c.end();
                                 });
                             });
 
                             debugServer("Calling server method '%s' for %s:%s", msg.name, c.remoteAddress, c.remotePort);
                             method.apply(null, args);
-                        });
+                        }, this.maxUploadSize);
                     });
 
                     c.on('close', function (hadError) {
@@ -791,7 +825,7 @@ class Server extends Socket {
                         if (c.writable) {
                             var output = new Output({error: err});
                             return output.serialize(c, function () {
-                                c.destroy();
+                                c.end();
                             });
                         }
                         c.destroy();
@@ -843,8 +877,9 @@ class Channel extends Socket {
             debugClient('Disconnected from %s:%s, hadError=%s', client.remoteAddress, client.remotePort, hadError);
         });
 
+        var output = new Output({});
+
         client.on('data', (data) => {
-            var output = new Output({});
             output.process(data, function (err, message) {
                 if (err) {
                     return client.emit('error', err);
@@ -900,8 +935,15 @@ class Channel extends Socket {
 
 class Client extends HostPortAuth {
 
-    constructor(host, port, auth) {
+    constructor(options) {
+        options = Object.assign({}, DEFAULT_SERVER_OPTIONS, options);
+        let {host, port, auth} = options;
         super(host, port, auth);
+        this[SYM_OPTIONS] = options;
+    }
+
+    get options() {
+        return this[SYM_OPTIONS];
     }
 
     rpc(name, args, cb) {
@@ -914,11 +956,11 @@ class Client extends HostPortAuth {
 module.exports = {
 
     server: function (options) {
-        return new Server(options.host || '0.0.0.0', options.port, options.auth);
+        return new Server(options);
     },
 
     client: function (options) {
-        return new Proxy(new Client(options.host || 'localhost', options.port, options.auth), {
+        return new Proxy(new Client(options), {
             get: function (target, prop) {
                 if (prop in target) {
                     return target[prop];
@@ -934,5 +976,18 @@ module.exports = {
                 };
             }
         });
-    }
+    },
+
+    Server,
+    Client,
+    Channel,
+    Socket,
+    HostPortAuth,
+    Output,
+    Input,
+    Message,
+    Field,
+
+    DEFAULT_SERVER_OPTIONS,
+    DEFAULT_CLIENT_OPTIONS
 };

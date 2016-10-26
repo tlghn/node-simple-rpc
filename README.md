@@ -16,7 +16,10 @@ Options :
         // Server port
         port: 12345,
         // Auth key, optional
-        auth: 'Your auth key'
+        auth: 'Your auth key',
+        // Max RPC Request length, defaults to 1MB.
+        // Used by server only
+        maxUploadSize: 1048576
     };
 ```
 
