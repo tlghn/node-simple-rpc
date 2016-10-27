@@ -735,14 +735,17 @@ class Socket extends HostPortAuth {
     get client() {
         return this[SYM_CLIENT];
     }
+
+    set client(value){
+        this[SYM_CLIENT] = value;
+    }
 }
 
 class Server extends Socket {
 
     constructor(options) {
         options = Object.assign({}, DEFAULT_SERVER_OPTIONS, options);
-        let {host, port, auth} = options;
-        super(host, port, auth);
+        super(options.host, options.port, options.auth);
         this[SYM_OPTIONS] = options;
         this[SYM_METHODS] = {};
         this[SYM_MIDDLEWARES] = [];
@@ -768,15 +771,19 @@ class Server extends Socket {
         return this[SYM_MIDDLEWARES];
     }
 
+    get client(){
+        return super.client;
+    }
+
     set client(value){
-        var old = this[SYM_CLIENT];
+        var old = super.client;
 
         if(value === null || value === void 0){
             if(old) {
                 old.close();
                 old.removeAllListeners();
             }
-            delete this[SYM_CLIENT];
+            super.client = null;
             return;
         }
 
@@ -788,7 +795,7 @@ class Server extends Socket {
             throw new errors.UnhandledError("client should be a net.Server instance");
         }
 
-        this[SYM_CLIENT] = value;
+        super.client = value;
 
         value.on('connection', c => {
 
