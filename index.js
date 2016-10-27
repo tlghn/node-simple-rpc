@@ -2,6 +2,7 @@ const net = require('net');
 const debugServer = require('debug')('node-simple-rpc:rpcServer');
 const debugClient = require('debug')('node-simple-rpc:rpcClient');
 const queue = require('node-callback-queue');
+const errors = require('./errors');
 
 const SYM_HOST = Symbol("host");
 const SYM_PORT = Symbol("port");
@@ -110,8 +111,10 @@ class Field {
                     case TYPE_ERROR:
                         return Field.readObject(buffer, offset, function (err, obj, offset) {
                             if (err) return next(err);
-                            obj = obj || {message: 'Unknown error'};
-                            var error = new Error(obj.message, obj.id);
+                            if(!obj) obj = {};
+                            var ErrorClass = errors[obj.name];
+                            if(!ErrorClass) ErrorClass = Error;
+                            var error = Object.assign(new ErrorClass(), obj);
                             next(null, error, offset);
                         });
 
@@ -162,20 +165,20 @@ class Field {
                         break;
                 }
 
-                next(new Error("Unsupported Type!"));
+                next(new errors.UnsupportedTypeError({type}));
             }
         );
     }
 
     static checkLength(buffer, offset, length, done) {
-        done(offset + length > buffer.length ? new Error('EOF') : null, length, offset);
+        done(offset + length > buffer.length ? new errors.EndOfStreamError() : null, length, offset);
     }
 
     static readNumeric(buffer, offset, done) {
         Field.deserialize(buffer, offset, function (err, result, offset) {
             if (err) return done(err);
             if (isNaN(result = Number(result))) {
-                return done(new Error("Expected number"));
+                return done(new errors.UnexpectedValueError("number"));
             }
             return done(null, result, offset);
         });
@@ -185,7 +188,7 @@ class Field {
         Field.readNumeric(buffer, offset, function (err, result, offset) {
             if (err) return done(err);
             if (result !== Math.floor(result)) {
-                return done(new Error("Expected integer"));
+                return done(new errors.UnexpectedValueError("integer"));
             }
             return done(null, result, offset);
         });
@@ -194,7 +197,7 @@ class Field {
     static readLength(buffer, offset, done) {
         Field.readInteger(buffer, offset, function (err, result, offset) {
             if (err) return done(err);
-            if (result < 0) return done(new Error("Expected positive integer"));
+            if (result < 0) return done(new errors.UnexpectedValueError("positive integer"));
             return done(null, result, offset);
         });
     }
@@ -293,7 +296,6 @@ class Field {
         )
     }
 
-
     static serialize(stream, value, done) {
         switch (typeof value) {
             case 'undefined':
@@ -310,7 +312,7 @@ class Field {
             case 'number':
                 return Field.writeNumber(stream, value, done);
         }
-        throw new Error('Unsuppoerted type');
+        done(new errors.UnsupportedTypeError({type: typeof value}));
     }
 
     static writeType(stream, type, done) {
@@ -354,10 +356,12 @@ class Field {
 
         if (value instanceof Error) {
             type = TYPE_ERROR;
-            value = {
-                message: value.message,
-                id: value.id
-            };
+
+            value = Object.getOwnPropertyNames(value)
+                .reduce((current, prop) => {
+                    current[prop] = value[prop];
+                    return current;
+                }, {});
         }
 
         var keys = Object.keys(value);
@@ -498,23 +502,23 @@ class Field {
 class Message {
 
     get keys(){
-        throw new Error("Abstract");
+        throw new errors.UnhandledError("Abstract");
     }
 
     onKeyFail(key, err, cb) {
-        throw new Error("Abstract!");
+        throw new errors.UnhandledError("Abstract!");
     }
 
     onKeyReady(key, value, cb) {
-        throw new Error("Abstract!");
+        throw new errors.UnhandledError("Abstract!");
     }
 
     onComplete(cb) {
-        throw new Error("Abstract!");
+        throw new errors.UnhandledError("Abstract!");
     }
 
     get data() {
-        throw new Error("Abstract!");
+        throw new errors.UnhandledError("Abstract!");
     }
 
     parse(cb) {
@@ -524,7 +528,7 @@ class Message {
         }
 
         if(this._offset > this.buffer.length){
-            return cb(new Error("Input is too long"));
+            return cb(new errors.InputOutOfRangeError("too long"));
         }
 
 
@@ -548,7 +552,7 @@ class Message {
     process(buffer, cb, maxUploadSize) {
 
         if (!Buffer.isBuffer(buffer)) {
-            return cb(new Error("Invalid input"));
+            return cb(new errors.InvalidRequestError());
         }
 
         if(typeof this._offset === 'undefined'){
@@ -567,11 +571,11 @@ class Message {
             var length = tmp.readUInt32BE(0);
 
             if(length <= 0){
-                return cb(new Error("Invalid input length"));
+                return cb(new errors.InvalidRequestError("Input length should be positive", {length}));
             }
 
             if(maxUploadSize && length > maxUploadSize){
-                return cb(new Error("Input length is too big ( " + length + " > " + maxUploadSize + " )"))
+                return cb(new errors.InputOutOfRangeError("Input length is too big ( %s > %s )", length, maxUploadSize, {length, maxUploadSize}))
             }
 
             this.buffer = Buffer.alloc(length);
@@ -637,7 +641,8 @@ class Input extends Message {
     }
 
     onKeyFail(key, err, cb) {
-        cb(new Error("Invalid Parameter. " + key + '=' + err.message));
+        err.parameter = key;
+        cb(err);
     }
 
     onKeyReady(key, value, cb) {
@@ -671,7 +676,8 @@ class Output extends Message {
     }
 
     onKeyFail(key, err, cb) {
-        cb(new Error("Invalid Parameter. " + key + '=' + err.message));
+        err.parameter = key;
+        cb(err);
     }
 
     onKeyReady(key, value, cb) {
@@ -699,12 +705,24 @@ class HostPortAuth {
         return this[SYM_HOST];
     }
 
+    set host(value) {
+        this[SYM_HOST] = value;
+    }
+
     get port() {
         return this[SYM_PORT];
     }
 
+    set port(value) {
+        this[SYM_PORT] = value;
+    }
+
     get auth() {
         return this[SYM_AUTH];
+    }
+
+    set auth(value){
+        this[SYM_AUTH] = value;
     }
 }
 
@@ -750,101 +768,152 @@ class Server extends Socket {
         return this[SYM_MIDDLEWARES];
     }
 
-    start() {
-        let {client} = this;
-        if (!client) {
-            this[SYM_CLIENT] = client =
-                net.createServer((c) => {
+    set client(value){
+        var old = this[SYM_CLIENT];
 
-                    debugServer("Client connected %s:%s", c.remoteAddress, c.remotePort);
+        if(value === null || value === void 0){
+            if(old) {
+                old.close();
+                old.removeAllListeners();
+            }
+            delete this[SYM_CLIENT];
+            return;
+        }
 
-                    c.setNoDelay(true);
-                    c.message = new Input({}, (auth, cb) => {
-                        debugServer("Client authentication %s:%s", c.remoteAddress, c.remotePort);
-                        c.auth = auth;
+        if(old === value) {
+            return;
+        }
 
-                        var middlewares = this.middlewares;
-                        if (!middlewares.length) {
-                            if (auth !== this.auth) {
-                                return cb(new Error("Unauthorized"));
-                            }
-                            return cb();
+        if(!(value instanceof net.Server)){
+            throw new errors.UnhandledError("client should be a net.Server instance");
+        }
+
+        this[SYM_CLIENT] = value;
+
+        value.on('connection', c => {
+
+            debugServer("Client connected %s:%s", c.remoteAddress, c.remotePort);
+
+            c.setNoDelay(true);
+            c.message = new Input({}, (auth, cb) => {
+                debugServer("Client authentication %s:%s", c.remoteAddress, c.remotePort);
+                c.auth = auth;
+
+                var middlewares = this.middlewares;
+                if (!middlewares.length) {
+                    if (auth !== this.auth) {
+                        return cb(new errors.AuthenticationError("Unauthorized"));
+                    }
+                    return cb();
+                }
+
+                var args = [cb];
+                middlewares.forEach(middleware => {
+                    args.push(function (next) {
+                        middleware(c, next);
+                    })
+                });
+                queue.apply(null, args);
+            });
+
+            c.on('data', (data) => {
+                c.message.process(data, (err, msg) => {
+                    debugServer("Processing message %s:%s", c.remoteAddress, c.remotePort);
+                    if (err) {
+                        return c.emit('error', err);
+                    }
+
+                    var method = this.exports[msg.name];
+                    if (typeof method !== 'function') {
+                        return c.emit('error', new errors.MethodNotFoundError('Method not found', {method: msg.name}));
+                    }
+
+                    var args = msg.args.slice();
+                    args.push(c, function (err) {
+
+                        if (err) {
+                            return c.emit('error', err);
                         }
 
-                        var args = [cb];
-                        middlewares.forEach(middleware => {
-                            args.push(function (next) {
-                                middleware(c, next);
-                            })
-                        });
-                        queue.apply(null, args);
-                    });
-
-                    c.on('data', (data) => {
-                        c.message.process(data, (err, msg) => {
-                            debugServer("Processing message %s:%s", c.remoteAddress, c.remotePort);
+                        debugServer("Sending results to %s:%s", c.remoteAddress, c.remotePort);
+                        var result = Array.prototype.slice.call(arguments, 1);
+                        var output = new Output({result});
+                        output.serialize(c, function (err) {
                             if (err) {
                                 return c.emit('error', err);
                             }
-
-                            var method = this.exports[msg.name];
-                            if (typeof method !== 'function') {
-                                return c.emit('error', new Error('Unknown method: ' + msg.name));
-                            }
-
-                            var args = msg.args.slice();
-                            args.push(c, function (err) {
-
-                                if (err) {
-                                    return c.emit('error', err);
-                                }
-
-                                debugServer("Sending results to %s:%s", c.remoteAddress, c.remotePort);
-                                var result = Array.prototype.slice.call(arguments, 1);
-                                var output = new Output({result});
-                                output.serialize(c, function (err) {
-                                    if (err) {
-                                        return c.emit('error', err);
-                                    }
-                                    debugServer("Results sent to %s:%s", c.remoteAddress, c.remotePort);
-                                    c.end();
-                                });
-                            });
-
-                            debugServer("Calling server method '%s' for %s:%s", msg.name, c.remoteAddress, c.remotePort);
-                            method.apply(null, args);
-                        }, this.maxUploadSize);
+                            debugServer("Results sent to %s:%s", c.remoteAddress, c.remotePort);
+                            c.end();
+                        });
                     });
 
-                    c.on('close', function (hadError) {
-                        debugServer('Client disconnected %s:%s, hadError=%s', c.remoteAddress, c.remotePort, hadError);
-                    });
+                    if(method.length !== args.length){
+                        return c.emit('error', new errors.InvalidRequestError('Invalid parameter length'));
+                    }
 
-                    c.on('error', function (err) {
-                        debugServer("Client error: %s:%s, %s", c.remoteAddress, c.remotePort, err);
-                        if (c.writable) {
-                            var output = new Output({error: err});
-                            return output.serialize(c, function () {
-                                c.end();
-                            });
-                        }
-                        c.destroy();
-                    });
-                });
-            client.on('listening', () => {
-                var addr = client.address();
-                debugServer('Server is listening on %s:%s', addr.address, addr.port);
+                    debugServer("Calling server method '%s' for %s:%s", msg.name, c.remoteAddress, c.remotePort);
+                    try{
+                        method.apply(null, args);
+                    } catch (err) {
+                        c.emit('error', err);
+                    }
+                }, this.maxUploadSize);
             });
+
+            c.on('close', function (hadError) {
+                debugServer('Client disconnected %s:%s, hadError=%s', c.remoteAddress, c.remotePort, hadError);
+            });
+
+            c.on('error', function (err) {
+                debugServer("Client error: %s:%s, %s", c.remoteAddress, c.remotePort, err);
+                if (c.writable) {
+                    var output = new Output({error: err});
+                    return output.serialize(c, function () {
+                        c.end();
+                    });
+                }
+                c.destroy();
+            });
+        });
+        value.on('listening', () => {
+            var addr = value.address();
+            debugServer('Server is listening on %s:%s', addr.address, addr.port);
+            this[SYM_HOST] = addr.address;
+            this[SYM_PORT] = addr.port;
+        });
+    }
+
+    start(port, host) {
+        port = Number(port);
+
+        if(!isNaN(port)){
+            this[SYM_PORT] = port;
         }
+
+        if(!!host){
+            this[SYM_HOST] = host;
+        }
+
+        var client = this.client;
+
+        if(client && client.listening){
+            var addr = client.address();
+            if((addr.port != this.port) || (addr.address != this.host)){
+                this.client = client = null;
+            }
+        }
+
+        if(!client){
+            this.client = client = net.createServer();
+        }
+
         if (client.listening) return;
+
         client.listen(this.port, this.host);
     }
 
     stop() {
-        let {client} = this;
-        if (!client) return;
-        client.close();
-        delete this[SYM_CLIENT];
+        this.client = null;
     }
 
     use(cb) {
@@ -905,6 +974,9 @@ class Channel extends Socket {
 
         client.on('error', (err) => {
             debugClient('RPC Request failed on %s:%s with %s', client.remoteAddress, client.remotePort, err);
+            if(!(err instanceof errors.RPCError)){
+                err = new errors.UnhandledError({inner: err});
+            }
             cb(err);
         });
 
@@ -956,7 +1028,22 @@ class Client extends HostPortAuth {
 module.exports = {
 
     server: function (options) {
-        return new Server(options);
+        var socket;
+
+        if(options instanceof net.Server){
+            socket = options;
+            options = Object.assign({}, DEFAULT_SERVER_OPTIONS, arguments[1] || {});
+
+            if(socket.listening){
+                var addr = socket.address();
+                options.host = addr.address;
+                options.port = addr.port;
+            }
+        }
+
+        var server = new Server(options);
+        server.client = socket;
+        return server;
     },
 
     client: function (options) {
@@ -989,5 +1076,7 @@ module.exports = {
     Field,
 
     DEFAULT_SERVER_OPTIONS,
-    DEFAULT_CLIENT_OPTIONS
+    DEFAULT_CLIENT_OPTIONS,
+
+    errors
 };
